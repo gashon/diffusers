@@ -46,11 +46,11 @@ class WanAttnProcessor2_0:
         encoder_hidden_states: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         rotary_emb: Optional[torch.Tensor] = None,
+        text_embedding_len: Optional[int] = 512,
     ) -> torch.Tensor:
         encoder_hidden_states_img = None
         if attn.add_k_proj is not None:
-            # 512 is the context length of the text encoder, hardcoded for now
-            image_context_length = encoder_hidden_states.shape[1] - 512
+            image_context_length = encoder_hidden_states.shape[1] - text_embedding_len
             encoder_hidden_states_img = encoder_hidden_states[:, :image_context_length]
             encoder_hidden_states = encoder_hidden_states[:, image_context_length:]
         if encoder_hidden_states is None:
@@ -276,6 +276,7 @@ class WanTransformerBlock(nn.Module):
         encoder_hidden_states: torch.Tensor,
         temb: torch.Tensor,
         rotary_emb: torch.Tensor,
+        text_embedding_len: Optional[int] = 512,
     ) -> torch.Tensor:
         shift_msa, scale_msa, gate_msa, c_shift_msa, c_scale_msa, c_gate_msa = (
             self.scale_shift_table + temb.float()
@@ -288,7 +289,7 @@ class WanTransformerBlock(nn.Module):
 
         # 2. Cross-attention
         norm_hidden_states = self.norm2(hidden_states.float()).type_as(hidden_states)
-        attn_output = self.attn2(hidden_states=norm_hidden_states, encoder_hidden_states=encoder_hidden_states)
+        attn_output = self.attn2(hidden_states=norm_hidden_states, encoder_hidden_states=encoder_hidden_states, text_embedding_len=text_embedding_len)
         hidden_states = hidden_states + attn_output
 
         # 3. Feed-forward
@@ -441,6 +442,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOrigi
         )
         timestep_proj = timestep_proj.unflatten(1, (6, -1))
 
+        text_embedding_len = encoder_hidden_states.shape[1]
         if encoder_hidden_states_image is not None:
             encoder_hidden_states = torch.concat([encoder_hidden_states_image, encoder_hidden_states], dim=1)
 
@@ -448,11 +450,11 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOrigi
         if torch.is_grad_enabled() and self.gradient_checkpointing:
             for block in self.blocks:
                 hidden_states = self._gradient_checkpointing_func(
-                    block, hidden_states, encoder_hidden_states, timestep_proj, rotary_emb
+                    block, hidden_states, encoder_hidden_states, timestep_proj, rotary_emb, text_embedding_len
                 )
         else:
             for block in self.blocks:
-                hidden_states = block(hidden_states, encoder_hidden_states, timestep_proj, rotary_emb)
+                hidden_states = block(hidden_states, encoder_hidden_states, timestep_proj, rotary_emb, text_embedding_len)
 
         # 5. Output norm, projection & unpatchify
         shift, scale = (self.scale_shift_table + temb.unsqueeze(1)).chunk(2, dim=1)

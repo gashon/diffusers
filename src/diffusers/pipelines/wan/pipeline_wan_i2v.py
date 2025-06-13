@@ -498,6 +498,7 @@ class WanImageToVideoPipeline(DiffusionPipeline, WanLoraLoaderMixin):
         ] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         max_sequence_length: int = 512,
+        action_chunk: Optional[torch.Tensor] = None,
     ):
         r"""
         The call function to the pipeline for generation.
@@ -696,6 +697,7 @@ class WanImageToVideoPipeline(DiffusionPipeline, WanLoraLoaderMixin):
                         encoder_hidden_states_image=image_embeds,
                         attention_kwargs=attention_kwargs,
                         return_dict=False,
+                        action_chunk=action_chunk,
                     )[0]
                     noise_pred = noise_uncond + guidance_scale * (noise_pred - noise_uncond)
 

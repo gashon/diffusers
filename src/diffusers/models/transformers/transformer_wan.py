@@ -155,18 +155,25 @@ class WanTimeTextImageEmbedding(nn.Module):
         if image_embed_dim is not None:
             self.image_embedder = WanImageEmbedding(image_embed_dim, dim, pos_embed_seq_len=pos_embed_seq_len)
 
-    def forward(
-        self,
-        timestep: torch.Tensor,
-        encoder_hidden_states: torch.Tensor,
-        encoder_hidden_states_image: Optional[torch.Tensor] = None,
-    ):
+    # action_chunk is provided as for hook
+    def _time_embed(self, timestep: torch.Tensor, encoder_hidden_states: torch.Tensor, action_chunk: Optional[torch.Tensor] = None) -> torch.Tensor:
         timestep = self.timesteps_proj(timestep)
 
         time_embedder_dtype = next(iter(self.time_embedder.parameters())).dtype
         if timestep.dtype != time_embedder_dtype and time_embedder_dtype != torch.int8:
             timestep = timestep.to(time_embedder_dtype)
-        temb = self.time_embedder(timestep).type_as(encoder_hidden_states)
+        temb = self.time_embedder(timestep)
+
+        return temb
+
+    def forward(
+        self,
+        timestep: torch.Tensor,
+        encoder_hidden_states: torch.Tensor,
+        encoder_hidden_states_image: Optional[torch.Tensor] = None,
+        action_chunk: Optional[torch.Tensor] = None,
+    ):
+        temb = self._time_embed(timestep, encoder_hidden_states, action_chunk).type_as(encoder_hidden_states)
         timestep_proj = self.time_proj(self.act_fn(temb))
 
         encoder_hidden_states = self.text_embedder(encoder_hidden_states)
@@ -282,6 +289,20 @@ class WanTransformerBlock(nn.Module):
             self.scale_shift_table + temb.float()
         ).chunk(6, dim=1)
 
+        # if applying frame level conditioning
+        if temb.shape[0] > 1:
+            frame_token_count = hidden_states.shape[1] // temb.shape[0]
+            def expand_frame_level_conditioning(x):
+                x = x.repeat(1, frame_token_count, 1)
+                x = x.view(1, -1, x.shape[-1])
+                return x
+
+            shift_msa = expand_frame_level_conditioning(shift_msa)
+            scale_msa = expand_frame_level_conditioning(scale_msa)
+            gate_msa = expand_frame_level_conditioning(gate_msa)
+            c_shift_msa = expand_frame_level_conditioning(c_shift_msa)
+            c_scale_msa = expand_frame_level_conditioning(c_scale_msa)
+
         # 1. Self-attention
         norm_hidden_states = (self.norm1(hidden_states.float()) * (1 + scale_msa) + shift_msa).type_as(hidden_states)
         attn_output = self.attn1(hidden_states=norm_hidden_states, rotary_emb=rotary_emb)
@@ -366,7 +387,6 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOrigi
         pos_embed_seq_len: Optional[int] = None,
     ) -> None:
         super().__init__()
-
         inner_dim = num_attention_heads * attention_head_dim
         out_channels = out_channels or in_channels
 
@@ -410,6 +430,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOrigi
         encoder_hidden_states_image: Optional[torch.Tensor] = None,
         return_dict: bool = True,
         attention_kwargs: Optional[Dict[str, Any]] = None,
+        action_chunk: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
         if attention_kwargs is not None:
             attention_kwargs = attention_kwargs.copy()
@@ -438,7 +459,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOrigi
         hidden_states = hidden_states.flatten(2).transpose(1, 2)
 
         temb, timestep_proj, encoder_hidden_states, encoder_hidden_states_image = self.condition_embedder(
-            timestep, encoder_hidden_states, encoder_hidden_states_image
+            timestep, encoder_hidden_states, encoder_hidden_states_image, action_chunk
         )
         timestep_proj = timestep_proj.unflatten(1, (6, -1))
 

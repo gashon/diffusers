@@ -302,6 +302,7 @@ class WanTransformerBlock(nn.Module):
             gate_msa = expand_frame_level_conditioning(gate_msa)
             c_shift_msa = expand_frame_level_conditioning(c_shift_msa)
             c_scale_msa = expand_frame_level_conditioning(c_scale_msa)
+            c_gate_msa = expand_frame_level_conditioning(c_gate_msa)
 
         # 1. Self-attention
         norm_hidden_states = (self.norm1(hidden_states.float()) * (1 + scale_msa) + shift_msa).type_as(hidden_states)
@@ -479,13 +480,22 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOrigi
 
         # 5. Output norm, projection & unpatchify
         shift, scale = (self.scale_shift_table + temb.unsqueeze(1)).chunk(2, dim=1)
-
         # Move the shift and scale tensors to the same device as hidden_states.
         # When using multi-GPU inference via accelerate these will be on the
         # first device rather than the last device, which hidden_states ends up
         # on.
         shift = shift.to(hidden_states.device)
         scale = scale.to(hidden_states.device)
+
+        if temb.shape[0] > 1:
+            frame_token_count = hidden_states.shape[1] // temb.shape[0]
+            def expand_frame_level_conditioning(x):
+                x = x.repeat(1, frame_token_count, 1)
+                x = x.view(1, -1, x.shape[-1])
+                return x
+
+            shift = expand_frame_level_conditioning(shift)
+            scale = expand_frame_level_conditioning(scale)
 
         hidden_states = (self.norm_out(hidden_states.float()) * (1 + scale) + shift).type_as(hidden_states)
         hidden_states = self.proj_out(hidden_states)

@@ -687,6 +687,7 @@ class WanImageToVideoPipeline(DiffusionPipeline, WanLoraLoaderMixin):
                     encoder_hidden_states_image=image_embeds,
                     attention_kwargs=attention_kwargs,
                     return_dict=False,
+                    action_chunk=action_chunk,
                 )[0]
 
                 if self.do_classifier_free_guidance:

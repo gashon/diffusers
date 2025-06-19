@@ -155,7 +155,7 @@ class WanTimeTextImageEmbedding(nn.Module):
         if image_embed_dim is not None:
             self.image_embedder = WanImageEmbedding(image_embed_dim, dim, pos_embed_seq_len=pos_embed_seq_len)
 
-    # action_chunk is provided as for hook
+    # action_chunk is provided for hook
     def _time_embed(self, timestep: torch.Tensor, encoder_hidden_states: torch.Tensor, action_chunk: Optional[torch.Tensor] = None) -> torch.Tensor:
         timestep = self.timesteps_proj(timestep)
 
@@ -166,6 +166,10 @@ class WanTimeTextImageEmbedding(nn.Module):
 
         return temb
 
+    # action_chunk is provided for hook
+    def _time_proj(self, temb: torch.Tensor, action_chunk: Optional[torch.Tensor] = None) -> torch.Tensor:
+        return self.time_proj(self.act_fn(temb))
+
     def forward(
         self,
         timestep: torch.Tensor,
@@ -174,7 +178,7 @@ class WanTimeTextImageEmbedding(nn.Module):
         action_chunk: Optional[torch.Tensor] = None,
     ):
         temb = self._time_embed(timestep, encoder_hidden_states, action_chunk).type_as(encoder_hidden_states)
-        timestep_proj = self.time_proj(self.act_fn(temb))
+        timestep_proj = self._time_proj(temb, action_chunk)
 
         encoder_hidden_states = self.text_embedder(encoder_hidden_states)
         if encoder_hidden_states_image is not None:
@@ -290,19 +294,16 @@ class WanTransformerBlock(nn.Module):
         ).chunk(6, dim=1)
 
         # if applying frame level conditioning
-        if temb.shape[0] > 1:
+        is_frame_level = temb.shape[0] > 1
+        if is_frame_level:
             frame_token_count = hidden_states.shape[1] // temb.shape[0]
+            assert frame_token_count == 1560
             def expand_frame_level_conditioning(x):
                 x = x.repeat(1, frame_token_count, 1)
                 x = x.view(1, -1, x.shape[-1])
                 return x
 
-            shift_msa = expand_frame_level_conditioning(shift_msa)
-            scale_msa = expand_frame_level_conditioning(scale_msa)
-            gate_msa = expand_frame_level_conditioning(gate_msa)
-            c_shift_msa = expand_frame_level_conditioning(c_shift_msa)
-            c_scale_msa = expand_frame_level_conditioning(c_scale_msa)
-            c_gate_msa = expand_frame_level_conditioning(c_gate_msa)
+            shift_msa, scale_msa, gate_msa, c_shift_msa, c_scale_msa, c_gate_msa = map(expand_frame_level_conditioning, (shift_msa, scale_msa, gate_msa, c_shift_msa, c_scale_msa, c_gate_msa))
 
         # 1. Self-attention
         norm_hidden_states = (self.norm1(hidden_states.float()) * (1 + scale_msa) + shift_msa).type_as(hidden_states)
@@ -475,7 +476,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOrigi
                     block, hidden_states, encoder_hidden_states, timestep_proj, rotary_emb, text_embedding_len
                 )
         else:
-            for block in self.blocks:
+            for i, block in enumerate(self.blocks):
                 hidden_states = block(hidden_states, encoder_hidden_states, timestep_proj, rotary_emb, text_embedding_len)
 
         # 5. Output norm, projection & unpatchify
@@ -487,15 +488,14 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOrigi
         shift = shift.to(hidden_states.device)
         scale = scale.to(hidden_states.device)
 
-        if temb.shape[0] > 1:
+        is_frame_level = temb.shape[0] > 1
+        if is_frame_level:
             frame_token_count = hidden_states.shape[1] // temb.shape[0]
             def expand_frame_level_conditioning(x):
                 x = x.repeat(1, frame_token_count, 1)
                 x = x.view(1, -1, x.shape[-1])
                 return x
-
-            shift = expand_frame_level_conditioning(shift)
-            scale = expand_frame_level_conditioning(scale)
+            shift, scale = map(expand_frame_level_conditioning, (shift, scale))
 
         hidden_states = (self.norm_out(hidden_states.float()) * (1 + scale) + shift).type_as(hidden_states)
         hidden_states = self.proj_out(hidden_states)

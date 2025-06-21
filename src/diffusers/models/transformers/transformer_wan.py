@@ -443,8 +443,6 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOrigi
         else:
             lora_scale = 1.0
 
-        is_logger = torch.distributed.get_rank() == 0 if torch.distributed.is_initialized() else False
-
         if USE_PEFT_BACKEND:
             # weight the lora layers by setting `lora_scale` for each PEFT layer
             scale_lora_layers(self, lora_scale)
@@ -482,8 +480,6 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOrigi
                 )
         else:
             for i, block in enumerate(self.blocks):
-                if is_logger:
-                    print("Layer ", i, torch.cuda.memory_allocated() / 1024**3)
                 hidden_states = block(hidden_states, encoder_hidden_states, timestep_proj, rotary_emb, text_embedding_len)
 
         # 5. Output norm, projection & unpatchify

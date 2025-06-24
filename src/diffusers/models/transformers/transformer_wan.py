@@ -18,7 +18,6 @@ from typing import Any, Dict, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import wandb
 
 from ...configuration_utils import ConfigMixin, register_to_config
 from ...loaders import FromOriginalModelMixin, PeftAdapterMixin
@@ -179,13 +178,13 @@ class WanTimeTextImageEmbedding(nn.Module):
         action_chunk: Optional[torch.Tensor] = None,
     ):
         temb = self._time_embed(timestep, encoder_hidden_states, action_chunk).type_as(encoder_hidden_states)
-        timestep_proj, action_embed = self._time_proj(temb, action_chunk)
+        timestep_proj = self._time_proj(temb, action_chunk)
 
         encoder_hidden_states = self.text_embedder(encoder_hidden_states)
         if encoder_hidden_states_image is not None:
             encoder_hidden_states_image = self.image_embedder(encoder_hidden_states_image)
 
-        return temb, timestep_proj, action_embed, encoder_hidden_states, encoder_hidden_states_image
+        return temb, timestep_proj, encoder_hidden_states, encoder_hidden_states_image
 
 
 class WanRotaryPosEmbed(nn.Module):
@@ -230,40 +229,6 @@ class WanRotaryPosEmbed(nn.Module):
         freqs = torch.cat([freqs_f, freqs_h, freqs_w], dim=-1).reshape(1, 1, ppf * pph * ppw, -1)
         return freqs
 
-class ActionAdaLN(nn.Module):
-    def __init__(self, dim: int, idx: int):
-        super().__init__()
-        self.idx = idx
-        self.adaln = torch.nn.Linear(dim, dim * 6)
-        self.adaln.weight.data.zero_()
-        self.adaln.bias.data.zero_()
-
-    @torch.compile
-    def _metrics(self, temb_proj: torch.Tensor, action_proj: torch.Tensor):
-        # calculate relative magnitude ratio
-        relative_magnitude_ratio = torch.norm(temb_proj, dim=-1) / torch.norm(action_proj, dim=-1)
-        relative_contribution = torch.norm(temb_proj + action_proj, dim=-1) / torch.norm(temb_proj, dim=-1)
-
-        return {
-            f"adaln/block_{self.idx}/relative_magnitude_ratio": relative_magnitude_ratio.mean(),
-            f"adaln/block_{self.idx}/relative_contribution": relative_contribution.mean(),
-            f"adaln/block_{self.idx}/l2_norm": torch.norm(self.adaln.weight.data),
-        }
-
-    def log(self, temb_proj: torch.Tensor, action_proj: torch.Tensor):
-        is_main_process = torch.distributed.get_rank() == 0
-        if not hasattr(self, 'training') or not is_main_process or wandb.run is None:
-            return
-
-        with torch.no_grad():
-            metrics = self._metrics(temb_proj, action_proj)
-            metrics = {k: v.item() if hasattr(v, 'item') else v for k, v in metrics.items()}
-
-            wandb.log(metrics, step=wandb.run.step)
-
-    def forward(self, action_embedding: torch.Tensor) -> torch.Tensor:
-        action_embedding = action_embedding.to(self.adaln.weight.dtype)
-        return self.adaln(action_embedding)
 
 class WanTransformerBlock(nn.Module):
     def __init__(
@@ -322,7 +287,6 @@ class WanTransformerBlock(nn.Module):
         encoder_hidden_states: torch.Tensor,
         temb: torch.Tensor,
         rotary_emb: torch.Tensor,
-        action_embedding: torch.Tensor,
         text_embedding_len: Optional[int] = 512,
     ) -> torch.Tensor:
         is_frame_level = temb.ndim == 4
@@ -331,15 +295,8 @@ class WanTransformerBlock(nn.Module):
         if is_frame_level:
             scale_shift_table = self.scale_shift_table.unsqueeze(1)
 
-        # action condition
-        action_adaln = self.action_adaln(action_embedding)
-        action_adaln = action_adaln.unflatten(-1, (6, -1))
-        cond = temb + action_adaln
-
-        self.action_adaln.log(temb, action_adaln)
-
         shift_msa, scale_msa, gate_msa, c_shift_msa, c_scale_msa, c_gate_msa = (
-            scale_shift_table + cond.float()
+            scale_shift_table + temb.float()
         ).chunk(6, dim=-2)
 
         if is_frame_level:
@@ -506,7 +463,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOrigi
         hidden_states = self.patch_embedding(hidden_states)
         hidden_states = hidden_states.flatten(2).transpose(1, 2)
 
-        temb, timestep_proj, action_embed, encoder_hidden_states, encoder_hidden_states_image = self.condition_embedder(
+        temb, timestep_proj, encoder_hidden_states, encoder_hidden_states_image = self.condition_embedder(
             timestep, encoder_hidden_states, encoder_hidden_states_image, action_chunk
         )
         timestep_proj = timestep_proj.unflatten(-1, (6, -1))
@@ -519,12 +476,11 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOrigi
         if torch.is_grad_enabled() and self.gradient_checkpointing:
             for block in self.blocks:
                 hidden_states = self._gradient_checkpointing_func(
-                    block, hidden_states, encoder_hidden_states, timestep_proj, rotary_emb, action_embed, text_embedding_len
+                    block, hidden_states, encoder_hidden_states, timestep_proj, rotary_emb, text_embedding_len
                 )
         else:
             for i, block in enumerate(self.blocks):
-                #logger.info(f"Block {i} {torch.cuda.memory_allocated() / 1024**2} MB")
-                hidden_states = block(hidden_states, encoder_hidden_states, timestep_proj, rotary_emb, action_embed, text_embedding_len)
+                hidden_states = block(hidden_states, encoder_hidden_states, timestep_proj, rotary_emb, text_embedding_len)
 
         # 5. Output norm, projection & unpatchify
         is_frame_level = temb.ndim == 3

@@ -156,7 +156,7 @@ class WanTimeTextImageEmbedding(nn.Module):
             self.image_embedder = WanImageEmbedding(image_embed_dim, dim, pos_embed_seq_len=pos_embed_seq_len)
 
     # action_chunk is provided for hook
-    def _time_embed(self, timestep: torch.Tensor, encoder_hidden_states: torch.Tensor, action_chunk: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def _time_embed(self, timestep: torch.Tensor, encoder_hidden_states: torch.Tensor, action_chunk: Optional[torch.Tensor] = None, state_chunk: Optional[torch.Tensor] = None) -> torch.Tensor:
         timestep = self.timesteps_proj(timestep)
 
         time_embedder_dtype = next(iter(self.time_embedder.parameters())).dtype
@@ -167,7 +167,7 @@ class WanTimeTextImageEmbedding(nn.Module):
         return temb
 
     # action_chunk is provided for hook
-    def _time_proj(self, temb: torch.Tensor, action_chunk: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def _time_proj(self, temb: torch.Tensor, action_chunk: Optional[torch.Tensor] = None, state_chunk: Optional[torch.Tensor] = None) -> torch.Tensor:
         return self.time_proj(self.act_fn(temb))
 
     def forward(
@@ -176,9 +176,10 @@ class WanTimeTextImageEmbedding(nn.Module):
         encoder_hidden_states: torch.Tensor,
         encoder_hidden_states_image: Optional[torch.Tensor] = None,
         action_chunk: Optional[torch.Tensor] = None,
+        state_chunk: Optional[torch.Tensor] = None,
     ):
-        temb = self._time_embed(timestep, encoder_hidden_states, action_chunk).type_as(encoder_hidden_states)
-        timestep_proj = self._time_proj(temb, action_chunk)
+        temb = self._time_embed(timestep, encoder_hidden_states, action_chunk, state_chunk).type_as(encoder_hidden_states)
+        timestep_proj = self._time_proj(temb, action_chunk, state_chunk)
 
         encoder_hidden_states = self.text_embedder(encoder_hidden_states)
         if encoder_hidden_states_image is not None:
@@ -436,6 +437,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOrigi
         return_dict: bool = True,
         attention_kwargs: Optional[Dict[str, Any]] = None,
         action_chunk: Optional[torch.Tensor] = None,
+        state_chunk: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
         if attention_kwargs is not None:
             attention_kwargs = attention_kwargs.copy()
@@ -464,7 +466,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOrigi
         hidden_states = hidden_states.flatten(2).transpose(1, 2)
 
         temb, timestep_proj, encoder_hidden_states, encoder_hidden_states_image = self.condition_embedder(
-            timestep, encoder_hidden_states, encoder_hidden_states_image, action_chunk
+            timestep, encoder_hidden_states, encoder_hidden_states_image, action_chunk, state_chunk
         )
         timestep_proj = timestep_proj.unflatten(-1, (6, -1))
 

@@ -499,6 +499,7 @@ class WanImageToVideoPipeline(DiffusionPipeline, WanLoraLoaderMixin):
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         max_sequence_length: int = 512,
         action_chunk: Optional[torch.Tensor] = None,
+        state_chunk: Optional[torch.Tensor] = None,
     ):
         r"""
         The call function to the pipeline for generation.
@@ -688,6 +689,7 @@ class WanImageToVideoPipeline(DiffusionPipeline, WanLoraLoaderMixin):
                     attention_kwargs=attention_kwargs,
                     return_dict=False,
                     action_chunk=action_chunk,
+                    state_chunk=state_chunk,
                 )[0]
 
                 if self.do_classifier_free_guidance:
@@ -699,6 +701,7 @@ class WanImageToVideoPipeline(DiffusionPipeline, WanLoraLoaderMixin):
                         attention_kwargs=attention_kwargs,
                         return_dict=False,
                         action_chunk=action_chunk,
+                        state_chunk=state_chunk,
                     )[0]
                     noise_pred = noise_uncond + guidance_scale * (noise_pred - noise_uncond)
 

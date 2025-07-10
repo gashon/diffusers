@@ -289,18 +289,22 @@ class WanTransformerBlock(nn.Module):
         rotary_emb: torch.Tensor,
         text_embedding_len: Optional[int] = 512,
     ) -> torch.Tensor:
-        shift_msa, scale_msa, gate_msa, c_shift_msa, c_scale_msa, c_gate_msa = (
-            self.scale_shift_table + temb.float()
-        ).chunk(6, dim=1)
+        is_frame_level = temb.ndim == 4
 
-        # if applying frame level conditioning
-        is_frame_level = temb.shape[0] > 1
+        scale_shift_table = self.scale_shift_table
         if is_frame_level:
-            frame_token_count = hidden_states.shape[1] // temb.shape[0]
+            scale_shift_table = self.scale_shift_table.unsqueeze(1)
+
+        shift_msa, scale_msa, gate_msa, c_shift_msa, c_scale_msa, c_gate_msa = (
+            scale_shift_table + temb.float()
+        ).chunk(6, dim=-2)
+
+        if is_frame_level:
+            frame_token_count = hidden_states.shape[1] // temb.shape[1]
             assert frame_token_count == 1560
             def expand_frame_level_conditioning(x):
-                x = x.repeat(1, frame_token_count, 1)
-                x = x.view(1, -1, x.shape[-1])
+                x = x.repeat(1, 1, frame_token_count, 1)
+                x = x.view(x.shape[0], -1, x.shape[-1])
                 return x
 
             shift_msa, scale_msa, gate_msa, c_shift_msa, c_scale_msa, c_gate_msa = map(expand_frame_level_conditioning, (shift_msa, scale_msa, gate_msa, c_shift_msa, c_scale_msa, c_gate_msa))
@@ -391,7 +395,6 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOrigi
         super().__init__()
         inner_dim = num_attention_heads * attention_head_dim
         out_channels = out_channels or in_channels
-
         # 1. Patch & position embedding
         self.rope = WanRotaryPosEmbed(attention_head_dim, patch_size, rope_max_seq_len)
         self.patch_embedding = nn.Conv3d(in_channels, inner_dim, kernel_size=patch_size, stride=patch_size)
@@ -463,7 +466,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOrigi
         temb, timestep_proj, encoder_hidden_states, encoder_hidden_states_image = self.condition_embedder(
             timestep, encoder_hidden_states, encoder_hidden_states_image, action_chunk
         )
-        timestep_proj = timestep_proj.unflatten(1, (6, -1))
+        timestep_proj = timestep_proj.unflatten(-1, (6, -1))
 
         text_embedding_len = encoder_hidden_states.shape[1]
         if encoder_hidden_states_image is not None:
@@ -480,7 +483,11 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOrigi
                 hidden_states = block(hidden_states, encoder_hidden_states, timestep_proj, rotary_emb, text_embedding_len)
 
         # 5. Output norm, projection & unpatchify
-        shift, scale = (self.scale_shift_table + temb.unsqueeze(1)).chunk(2, dim=1)
+        is_frame_level = temb.ndim == 3
+        scale_shift_table = self.scale_shift_table
+        if is_frame_level:
+            scale_shift_table = self.scale_shift_table.unsqueeze(1)
+        shift, scale = (scale_shift_table + temb.unsqueeze(-2)).chunk(2, dim=1)
         # Move the shift and scale tensors to the same device as hidden_states.
         # When using multi-GPU inference via accelerate these will be on the
         # first device rather than the last device, which hidden_states ends up
@@ -488,12 +495,11 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOrigi
         shift = shift.to(hidden_states.device)
         scale = scale.to(hidden_states.device)
 
-        is_frame_level = temb.shape[0] > 1
         if is_frame_level:
-            frame_token_count = hidden_states.shape[1] // temb.shape[0]
+            frame_token_count = hidden_states.shape[1] // temb.shape[1]
             def expand_frame_level_conditioning(x):
-                x = x.repeat(1, frame_token_count, 1)
-                x = x.view(1, -1, x.shape[-1])
+                x = x.repeat(1, 1, frame_token_count, 1)
+                x = x.view(x.shape[0], -1, x.shape[-1])
                 return x
             shift, scale = map(expand_frame_level_conditioning, (shift, scale))
 
